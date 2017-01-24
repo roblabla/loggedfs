@@ -28,6 +28,10 @@
 #define _X_SOURCE 500
 #endif
 
+#include <sqlite3.h>
+#include <pthread.h>
+#include <curl/curl.h>
+#include <assert.h>
 #include <fuse.h>
 #include <stdio.h>
 #include <string.h>
@@ -39,11 +43,6 @@
 #ifdef HAVE_SETXATTR
 #include <sys/xattr.h>
 #endif
-#include <rlog/rlog.h>
-#include <rlog/Error.h>
-#include <rlog/RLogChannel.h>
-#include <rlog/SyslogNode.h>
-#include <rlog/StdioNode.h>
 #include <stdarg.h>
 #include <getopt.h>
 #include <sys/time.h>
@@ -52,18 +51,14 @@
 #include "Config.h"
 
 #define PUSHARG(ARG) \
-rAssert(out->fuseArgc < MaxFuseArgs); \
+assert(out->fuseArgc < MaxFuseArgs); \
 out->fuseArgv[out->fuseArgc++] = ARG
 
 using namespace std;
-using namespace rlog;
 
-
-static RLogChannel *Info = DEF_CHANNEL("info", Log_Info);
 static Config config;
 static int savefd;
 static int fileLog=0;
-static StdioNode* fileLogNode=NULL;
 
 const int MaxFuseArgs = 32;
 struct LoggedFS_Args
@@ -75,6 +70,13 @@ struct LoggedFS_Args
     int fuseArgc;
 };
 
+struct env {
+    sqlite3 *db;
+    pthread_cond_t *cond_var;
+    pthread_mutex_t *m;
+};
+
+static struct env env;
 
 static LoggedFS_Args *loggedfsArgs = new LoggedFS_Args;
 
@@ -124,9 +126,72 @@ static char* getcallername()
     return strdup(cmdline);
 }
 
+int upload_single(void *data, int col_nbr, char **cols, char **col_name)
+{
+    CURL *curl = curl_easy_init();
+    curl_easy_setopt(curl, CURLOPT_URL, "http://bbfs.seed-up.org/data");
+    curl_easy_setopt(curl, CURLOPT_POST, 1);
+    for (int i; i < col_nbr; i++)
+    {
+        if (strcmp(col_name[i], "str"))
+        {
+            curl_easy_setopt(curl, CURLOPT_POSTFIELDS, cols[i]);
+            break;
+        }
+    }
+    curl_easy_perform(curl);
+    curl_easy_cleanup(curl);
+    return (0);
+}
+
+void *upload_thread(void *data)
+{
+    pthread_mutex_lock(env.m);
+    while (true)
+    {
+        // SELECT * FROM db WHERE uploaded=false
+        // upload
+        // update
+        // upload
+        // update
+        // upload
+        // update ?
+        //
+        //
+        // Or maybe I can actually try to be slightly smarter and batch upload ?
+        // Also, we should probably uniquely identify the machine. Need to store
+        // a UUID somewhere (preferably in the sqlite db) that says who this is.
+        //
+        // This way, I can just bulk send with the UUID, and the merge should be
+        // easy.
+        // TODO: Proper error handling
+        sqlite3_exec(env.db, "SELECT * FROM rows WHERE uploaded=FALSE", upload_single, NULL, NULL);
+        pthread_cond_wait(env.cond_var, env.m);
+    }
+    pthread_mutex_unlock(env.m);
+}
+
+void send_log(sqlite3 *db, pthread_cond_t *cond_var, char *str) {
+    sqlite3_stmt *stmt;
+
+    // First, store it in sql
+    sqlite3_prepare_v2(db, "INSERT INTO rows (str, uploaded) VALUES (?, FALSE)", -1, &stmt, NULL);
+    sqlite3_bind_text(stmt, 0, str, -1, &free);
+    int rc = sqlite3_step(stmt);
+    if (rc != SQLITE_DONE) {
+        printf("ERROR inserting data: %s\n", sqlite3_errmsg(db));
+        return;
+    }
+    sqlite3_finalize(stmt);
+
+    // Then, send it to the upload thread
+    pthread_cond_signal(cond_var);
+}
+
 static void loggedfs_log(const char* path,const char* action,const int returncode,const char *format,...)
 {
-    char *retname;
+    const char *retname;
+    char *mybuf;
     if (returncode >= 0)
         retname = "SUCCESS";
     else
@@ -139,10 +204,8 @@ static void loggedfs_log(const char* path,const char* action,const int returncod
         memset(buf,0,1024);
         vsprintf(buf,format,args);
         strcat(buf," {%s} [ pid = %d %s uid = %d ]");
-        if (returncode >= 0)
-		rLog(Info, buf,retname, fuse_get_context()->pid,config.isPrintProcessNameEnabled()?getcallername():"", fuse_get_context()->uid);
-	else
-		rError( buf,retname, fuse_get_context()->pid,config.isPrintProcessNameEnabled()?getcallername():"", fuse_get_context()->uid);
+        asprintf(&mybuf, buf,retname, fuse_get_context()->pid,config.isPrintProcessNameEnabled()?getcallername():"", fuse_get_context()->uid);
+        send_log(env.db, env.cond_var, mybuf);
         va_end(args);
     }
 }
@@ -320,12 +383,12 @@ static int loggedFS_rmdir(const char *path)
 static int loggedFS_symlink(const char *from, const char *to)
 {
     int res;
-    
+
     char *aTo = getAbsolutePath(to);
     to = getRelativePath(to);
-    
+
     res = symlink(from, to);
-    
+
     loggedfs_log( aTo,"symlink",res,"symlink from %s to %s",aTo,from);
     if(res == -1)
         return -errno;
@@ -358,7 +421,7 @@ static int loggedFS_link(const char *from, const char *to)
     char *aTo = getAbsolutePath(to);
     from=getRelativePath(from);
     to = getRelativePath(to);
-    
+
     res = link(from, to);
     loggedfs_log( aTo,"link",res,"hard link from %s to %s",aTo,aFrom);
     if(res == -1)
@@ -407,7 +470,7 @@ static int loggedFS_chown(const char *path, uid_t uid, gid_t gid)
 
     char* username = getusername(uid);
     char* groupname = getgroupname(gid);
-	
+
     if (username!=NULL && groupname!=NULL)
 	    loggedfs_log(aPath,"chown",res,"chown %s to %d:%d %s:%s",aPath, uid, gid, username, groupname);
     else
@@ -463,7 +526,7 @@ static int loggedFS_utimens(const char *path, const struct timespec ts[2])
     tv[1].tv_usec = ts[1].tv_nsec / 1000;
 
     res = utimes(path, tv);
-    
+
     loggedfs_log(aPath,"utimens",res,"utimens %s",aPath);
     if (res == -1)
         return -errno;
@@ -491,7 +554,7 @@ static int loggedFS_open(const char *path, struct fuse_file_info *fi)
 		loggedfs_log(aPath,"open-readwrite",res,"open readwrite %s",aPath);
 	}
 	else  loggedfs_log(aPath,"open",res,"open %s",aPath);
-   
+
     if(res == -1)
         return -errno;
 
@@ -673,35 +736,29 @@ bool processArgs(int argc, char *argv[], LoggedFS_Args *out)
     {
         switch (res)
         {
-	case 'h':
+        case 'h':
             usage(argv[0]);
             return false;
         case 'f':
             out->isDaemon = false;
             // this option was added in fuse 2.x
             PUSHARG("-f");
-	    	rLog(Info,"LoggedFS not running as a daemon");
+            printf("LoggedFS not running as a daemon\n");
             break;
         case 'p':
             PUSHARG("-o");
             PUSHARG("allow_other,default_permissions," COMMON_OPTS);
-            got_p = true; 
-            rLog(Info,"LoggedFS running as a public filesystem");
+            got_p = true;
+            printf("LoggedFS running as a public filesystem\n");
             break;
         case 'e':
             PUSHARG("-o");
             PUSHARG("nonempty");
-            rLog(Info,"Using existing directory");
+            printf("Using existing directory\n");
             break;
         case 'c':
             out->configFilename=optarg;
-	    	rLog(Info,"Configuration file : %s",optarg);
-            break;
-        case 'l':
-            fileLog=open(optarg,O_WRONLY|O_CREAT|O_APPEND );
-            fileLogNode=new StdioNode(fileLog);
-            fileLogNode->subscribeTo( RLOG_CHANNEL("") );
-	    	rLog(Info,"LoggedFS log file : %s",optarg);
+            printf("Configuration file : %s\n",optarg);
             break;
 
         default:
@@ -725,18 +782,18 @@ bool processArgs(int argc, char *argv[], LoggedFS_Args *out)
     else
     {
         fprintf(stderr,"Missing mountpoint\n");
-	usage(argv[0]);
+        usage(argv[0]);
         return false;
     }
 
     // If there are still extra unparsed arguments, pass them onto FUSE..
     if(optind < argc)
     {
-        rAssert(out->fuseArgc < MaxFuseArgs);
+        assert(out->fuseArgc < MaxFuseArgs);
 
         while(optind < argc)
         {
-            rAssert(out->fuseArgc < MaxFuseArgs);
+            assert(out->fuseArgc < MaxFuseArgs);
             out->fuseArgv[out->fuseArgc++] = argv[optind];
             ++optind;
         }
@@ -751,18 +808,13 @@ bool processArgs(int argc, char *argv[], LoggedFS_Args *out)
     return true;
 }
 
-
-
-
 int main(int argc, char *argv[])
 {
-    RLogInit( argc, argv );
-
-    StdioNode* stdLog=new StdioNode(STDOUT_FILENO);
-    stdLog->subscribeTo( RLOG_CHANNEL("") );
-    SyslogNode *logNode = NULL;
     char* input=new char[2048]; // 2ko MAX input for configuration
-
+    sqlite3 *db;
+    pthread_cond_t cond_var = PTHREAD_COND_INITIALIZER;
+    pthread_mutex_t m = PTHREAD_MUTEX_INITIALIZER;
+    pthread_t t;
 
 
 
@@ -811,23 +863,14 @@ int main(int argc, char *argv[])
 
     if (processArgs(argc, argv, loggedfsArgs))
     {
-        if (loggedfsArgs->isDaemon)
-        {
-            logNode = new SyslogNode( "loggedfs" );
-            logNode->subscribeTo( RLOG_CHANNEL("") );
-            // disable stderr reporting..
-            delete stdLog;
-            stdLog = NULL;
-        }
-
-        rLog(Info, "LoggedFS starting at %s.",loggedfsArgs->mountPoint);
+        printf("LoggedFS starting at %s.\n",loggedfsArgs->mountPoint);
 
         if (loggedfsArgs->configFilename!=NULL)
         {
 
             if (strcmp(loggedfsArgs->configFilename,"-")==0)
             {
-                rLog(Info, "Using stdin configuration");
+                printf("Using stdin configuration\n");
                 memset(input,0,2048);
                 char *ptr=input;
 
@@ -840,36 +883,40 @@ int main(int argc, char *argv[])
             }
             else
             {
-                rLog(Info, "Using configuration file %s.",loggedfsArgs->configFilename);
+                printf("Using configuration file %s.\n",loggedfsArgs->configFilename);
                 config.loadFromXmlFile(loggedfsArgs->configFilename);
             }
         }
 
-        rLog(Info,"chdir to %s",loggedfsArgs->mountPoint);
+        printf("chdir to %s\n",loggedfsArgs->mountPoint);
         chdir(loggedfsArgs->mountPoint);
         savefd = open(".", 0);
+
+        int err;
+        if ((err = sqlite3_open("/tmp/fslogs.db", &db)) != SQLITE_OK) {
+            printf("Error opening sqlite database : %s\n", sqlite3_errstr(err));
+            return 0;
+        }
+
+        // TODO: CREATE TABLE IF NOT EXISTS
+
+        env.db = db;
+        env.cond_var = &cond_var;
+        env.m = &m;
+
+        if (pthread_create(&t, NULL, &upload_thread, NULL) < 0)
+        {
+            // TODO: ERROR
+        }
 
 #if (FUSE_USE_VERSION==25)
         fuse_main(loggedfsArgs->fuseArgc,
                   const_cast<char**>(loggedfsArgs->fuseArgv), &loggedFS_oper);
 #else
-	 fuse_main(loggedfsArgs->fuseArgc,
+        fuse_main(loggedfsArgs->fuseArgc,
                   const_cast<char**>(loggedfsArgs->fuseArgv), &loggedFS_oper, NULL);
 #endif
-        delete stdLog;
-        stdLog = NULL;
-        if (fileLog!=0)
-        {
-            delete fileLogNode;
-            fileLogNode=NULL;
-            close(fileLog);
-        }
-        if (loggedfsArgs->isDaemon)
-        {
-            delete logNode;
-            logNode=NULL;
-        }
-        rLog(Info,"LoggedFS closing.");
+        printf("LoggedFS closing.\n");
 
     }
 }

@@ -1,8 +1,9 @@
 CC=g++
-CFLAGS=-Wall -ansi -D_FILE_OFFSET_BITS=64 -DFUSE_USE_VERSION=26 -DRLOG_COMPONENT="loggedfs" `xml2-config --cflags`
-LDFLAGS=-Wall -ansi -lpcre -lfuse -lrlog `xml2-config --libs`
+CFLAGS=-Wall -ansi -D_FILE_OFFSET_BITS=64 -DFUSE_USE_VERSION=26 `xml2-config --cflags`
+LDFLAGS=-Wall -ansi -lpcre -lfuse `xml2-config --libs` -lsqlite3 -lpthread -lcurl
 srcdir=src
 builddir=build
+PREFIX=/
 
 all: $(builddir) loggedfs
 
@@ -22,17 +23,18 @@ $(builddir)/Filter.o: $(srcdir)/Filter.cpp $(srcdir)/Filter.h
 
 clean:
 	rm -rf $(builddir)/
-	
+
 install:
+	echo $(PREFIX)
 	gzip loggedfs.1
-	cp loggedfs.1.gz /usr/share/man/man1/
-	cp loggedfs /usr/bin/
-	cp loggedfs.xml /etc/
+	cp loggedfs.1.gz $(PREFIX)/share/man/man1/
+	cp loggedfs $(PREFIX)/bin/
+	cp loggedfs.xml $(PREFIX)/etc/
 
 
 mrproper: clean
 	rm -rf loggedfs
-			
+
 release:
 	tar -c --exclude="CVS" $(srcdir)/ loggedfs.xml LICENSE loggedfs.1.gz Makefile | bzip2 - > loggedfs.tar.bz2
 
