@@ -130,6 +130,7 @@ int upload_single(void *data, int col_nbr, char **cols, char **col_name)
 {
     CURL *curl = curl_easy_init();
     curl_easy_setopt(curl, CURLOPT_URL, "http://bbfs.seed-up.org/data");
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1);
     curl_easy_setopt(curl, CURLOPT_POST, 1);
     for (int i; i < col_nbr; i++)
     {
@@ -139,7 +140,14 @@ int upload_single(void *data, int col_nbr, char **cols, char **col_name)
             break;
         }
     }
-    curl_easy_perform(curl);
+    int res = curl_easy_perform(curl);
+    int http_code = 0;
+
+    curl_easy_getinfo (curl, CURLINFO_RESPONSE_CODE, &http_code);
+    if (res != CURLE_OK)
+        dprintf(2, "%s:%d: ERROR with curl\n", __FILE__, __LINE__);
+    if (http_code >= 400)
+        dprintf(2, "%s:%d: ERROR http code: %d\n", __FILE__, __LINE__, http_code);
     curl_easy_cleanup(curl);
     return (0);
 }
@@ -165,7 +173,7 @@ void *upload_thread(void *data)
         // This way, I can just bulk send with the UUID, and the merge should be
         // easy.
         // TODO: Proper error handling
-        sqlite3_exec(env.db, "SELECT * FROM rows WHERE uploaded=FALSE", upload_single, NULL, NULL);
+        sqlite3_exec(env.db, "SELECT * FROM logs WHERE uploaded=0", upload_single, NULL, NULL);
         pthread_cond_wait(env.cond_var, env.m);
     }
     pthread_mutex_unlock(env.m);
@@ -175,8 +183,8 @@ void send_log(sqlite3 *db, pthread_cond_t *cond_var, char *str) {
     sqlite3_stmt *stmt;
 
     // First, store it in sql
-    sqlite3_prepare_v2(db, "INSERT INTO rows (str, uploaded) VALUES (?, FALSE)", -1, &stmt, NULL);
-    sqlite3_bind_text(stmt, 0, str, -1, &free);
+    sqlite3_prepare_v2(db, "INSERT INTO logs (str, uploaded) VALUES (?, 0)", -1, &stmt, NULL);
+    sqlite3_bind_text(stmt, 1, str, -1, &free);
     int rc = sqlite3_step(stmt);
     if (rc != SQLITE_DONE) {
         printf("ERROR inserting data: %s\n", sqlite3_errmsg(db));
@@ -898,8 +906,20 @@ int main(int argc, char *argv[])
             return 0;
         }
 
-        // TODO: CREATE TABLE IF NOT EXISTS
-
+        if (sqlite3_exec(db, "SELECT 1 from logs", NULL, NULL, NULL) != SQLITE_OK)
+        {
+            printf("Creating table logs...\n");
+            char create_logs[] = "CREATE TABLE logs ("\
+                                 "id       INTEGER PRIMARY KEY AUTOINCREMENT,"\
+                                 "str      TEXT,"\
+                                 "uploaded INT"\
+                                 ");";
+            int rc = sqlite3_exec(db, create_logs, NULL, NULL, NULL);
+            if (rc != SQLITE_OK)
+                printf("ERROR creating logs: %s\n", sqlite3_errmsg(db));
+            else
+                printf("Success creating table logs\n");
+        }
         env.db = db;
         env.cond_var = &cond_var;
         env.m = &m;
