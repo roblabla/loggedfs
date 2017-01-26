@@ -24,8 +24,8 @@
 
 
 #ifdef linux
-/* For pread()/pwrite() */
-#define _X_SOURCE 500
+  /* For pread()/pwrite() */
+  #define _X_SOURCE 500
 #endif
 
 #include <sqlite3.h>
@@ -39,9 +39,11 @@
 #include <fcntl.h>
 #include <dirent.h>
 #include <errno.h>
-#include <sys/statfs.h>
+#ifndef __APPLE__
+  #include <sys/statfs.h>
+#endif
 #ifdef HAVE_SETXATTR
-#include <sys/xattr.h>
+  #include <sys/xattr.h>
 #endif
 #include <stdarg.h>
 #include <getopt.h>
