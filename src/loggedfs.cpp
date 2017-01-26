@@ -129,14 +129,24 @@ static char* getcallername()
 int upload_single(void *data, int col_nbr, char **cols, char **col_name)
 {
     CURL *curl = curl_easy_init();
+    struct curl_slist *headers = NULL;
+
+    headers = curl_slist_append(headers, "Content-Type: application/json");
+
     curl_easy_setopt(curl, CURLOPT_URL, "http://bbfs.seed-up.org/data");
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1);
     curl_easy_setopt(curl, CURLOPT_POST, 1);
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+
     for (int i; i < col_nbr; i++)
     {
-        if (strcmp(col_name[i], "str"))
+        if (strcmp(col_name[i], "str") == 0)
         {
-            curl_easy_setopt(curl, CURLOPT_POSTFIELDS, cols[i]);
+            printf("Add to postfields: %s\n", cols[i]);
+            char *json;
+            asprintf(&json, "{\"str\": \"%s\"}", cols[i]);
+            curl_easy_setopt(curl, CURLOPT_POSTFIELDS, json);
+            curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, strlen(json));
             break;
         }
     }
@@ -146,8 +156,10 @@ int upload_single(void *data, int col_nbr, char **cols, char **col_name)
     curl_easy_getinfo (curl, CURLINFO_RESPONSE_CODE, &http_code);
     if (res != CURLE_OK)
         dprintf(2, "%s:%d: ERROR with curl\n", __FILE__, __LINE__);
-    if (http_code >= 400)
+    else if (http_code >= 400)
         dprintf(2, "%s:%d: ERROR http code: %d\n", __FILE__, __LINE__, http_code);
+    else
+        (void)1; // TODO: Data is sended so set uploadted to 1
     curl_easy_cleanup(curl);
     return (0);
 }
