@@ -60,7 +60,6 @@ using namespace std;
 
 static Config config;
 static int savefd;
-static int fileLog=0;
 
 const int MaxFuseArgs = 32;
 struct LoggedFS_Args
@@ -140,7 +139,7 @@ int upload_single(void *data, int col_nbr, char **cols, char **col_name)
     curl_easy_setopt(curl, CURLOPT_POST, 1);
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
 
-    for (int i; i < col_nbr; i++)
+    for (int i = 0; i < col_nbr; i++)
     {
         if (strcmp(col_name[i], "str") == 0)
         {
