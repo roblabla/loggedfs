@@ -751,7 +751,11 @@ bool processArgs(int argc, char *argv[], LoggedFS_Args *out)
 // logging the ~/.kde/share/config directory, in which hard links for lock
 // files are verified by their inode equivalency.
 
-#define COMMON_OPTS "nonempty,use_ino"
+#ifdef __APPLE__
+  #define COMMON_OPTS "use_ino"
+#else
+  #define COMMON_OPTS "nonempty,use_ino"
+#endif
 
     while ((res = getopt (argc, argv, "hpfec:l:")) != -1)
     {
@@ -773,9 +777,13 @@ bool processArgs(int argc, char *argv[], LoggedFS_Args *out)
             printf("LoggedFS running as a public filesystem\n");
             break;
         case 'e':
+#ifndef __APPLE__
             PUSHARG("-o");
             PUSHARG("nonempty");
             printf("Using existing directory\n");
+#else
+            dprintf(2, "WARNING -e: osxfuse can't understand nonempty option\n");
+#endif
             break;
         case 'c':
             out->configFilename=optarg;
@@ -939,6 +947,7 @@ int main(int argc, char *argv[])
 
         if (pthread_create(&t, NULL, &upload_thread, NULL) < 0)
         {
+            dprintf(2, "ERROR pthread_create failed\n");
             // TODO: ERROR
         }
 
