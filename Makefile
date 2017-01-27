@@ -1,6 +1,6 @@
 CC=g++
-CFLAGS=-Wall -ansi -D_FILE_OFFSET_BITS=64 -DFUSE_USE_VERSION=26 `xml2-config --cflags`
-LDFLAGS=-Wall -ansi -lpcre -lfuse `xml2-config --libs` -lsqlite3 -lpthread -lcurl
+CFLAGS=-Wall -D_FILE_OFFSET_BITS=64 -DFUSE_USE_VERSION=26 `xml2-config --cflags`
+LDFLAGS=-Wall -lpcre `pkg-config fuse --libs` `xml2-config --libs` -lsqlite3 -lpthread -lcurl
 srcdir=src
 builddir=build
 PREFIX=/
